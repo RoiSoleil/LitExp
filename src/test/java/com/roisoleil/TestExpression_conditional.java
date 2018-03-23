@@ -8,7 +8,7 @@ import org.junit.Test;
 
 public class TestExpression_conditional {
 
-	@Test
+//	@Test
 	public void testLitExp_caseIf() {
 		assertEquals(6, new Expression("if(0, 5, 6)").eval(BigDecimal.class).doubleValue(), 0);
 	}
