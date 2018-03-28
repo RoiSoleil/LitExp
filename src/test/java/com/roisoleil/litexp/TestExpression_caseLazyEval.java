@@ -18,9 +18,4 @@ public class TestExpression_caseLazyEval {
 		evalToDouble("if(0, 0, 5/0)");
 	}
 
-	// @Test(expected=ArithmeticException.class)
-	// public void testLazyEval_withException() {
-	// evalToDouble("if(0, 0, 5/0)");
-	// }
-
 }
