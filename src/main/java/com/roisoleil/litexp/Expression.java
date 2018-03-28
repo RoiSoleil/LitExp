@@ -21,11 +21,14 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
-package com.roisoleil;
+package com.roisoleil.litexp;
+
+import static com.roisoleil.litexp.Expression.Utils.adapt;
 
 import java.math.BigDecimal;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.Iterator;
 import java.util.List;
@@ -35,6 +38,7 @@ import java.util.Objects;
 import java.util.Stack;
 import java.util.TreeMap;
 import java.util.function.Supplier;
+import java.util.stream.IntStream;
 
 public class Expression {
 
@@ -54,7 +58,7 @@ public class Expression {
 
 	public static final int OPERATOR_PRECEDENCE_ADDITIVE = 20;
 
-	private static final Operand<?> PARAMS_START = new Operand<Void>() {
+	private static final Operand PARAMS_START = new Operand() {
 
 		@Override
 		public Void getValue() {
@@ -72,27 +76,32 @@ public class Expression {
 
 	private String firstVarChars = "_";
 
-	private Map<String, Operator<?>> operators = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+	private Map<String, Operator> operators = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
-	private Map<String, UnaryOperator<?>> unaryOperators = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+	private Map<String, UnaryOperator> unaryOperators = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
-	private Map<String, Function<?>> functions = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+	private Map<String, Function> functions = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
-	private Map<String, Operand<?>> variables = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+	private Map<String, Operand> variables = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
-	// private OperandFactory operandFactory = new DefaultOperandFactory();
+	private OperandFactory operandFactory = new DefaultOperandFactory(this);
 
 	private static final char decimalSeparator = '.';
 
 	enum TokenType {
-		FUNCTION, OPERATOR, UNARY_OPERATOR, VARIABLE, LITERAL, OPEN_PAREN, CLOSE_PAREN, COMMA, STRINGPARAM
+		FUNCTION, OPERATOR, UNARY_OPERATOR, NUMBER, STRING, VARIABLE, OPEN_BRACKET, CLOSE_BRACKET, COMMA
 	}
 
 	class Token {
 
-		public String surface = "";
 		public TokenType type;
+
+		public int rawStart;
+		public String rawSurface = "";
+
 		public int start;
+		public String surface = "";
+
 		public int end;
 
 		public void append(char c) {
@@ -118,7 +127,7 @@ public class Expression {
 	 * Expression tokenizer that allows to iterate over a {@link String} expression
 	 * token by token. Blank characters will be skipped.
 	 */
-	private class Tokenizer implements Iterator<Token> {
+	public class Tokenizer implements Iterator<Token> {
 
 		private int actualPosition = 0;
 		private String input;
@@ -139,31 +148,37 @@ public class Expression {
 
 		@Override
 		public Token next() {
-			Token token = new Token();
 			if (actualPosition >= input.length()) {
 				return previousToken = null;
 			}
+			// init
+			Token token = new Token();
+			token.rawStart = actualPosition;
 			char ch = input.charAt(actualPosition);
+			// pre-trim
 			while (Character.isWhitespace(ch) && actualPosition < input.length()) {
 				ch = input.charAt(++actualPosition);
 			}
-			token.end = actualPosition;
-
+			token.start = actualPosition;
+			// case number
 			if (Character.isDigit(ch) || (ch == decimalSeparator && Character.isDigit(peekNextChar()))) {
 				while (actualPosition < input.length() && (Character.isDigit(ch) || ch == decimalSeparator)) {
-					token.append(input.charAt(actualPosition++));
-					ch = actualPosition == input.length() ? 0 : input.charAt(actualPosition);
+					if (!(++actualPosition < input.length()))
+						break;
+					ch = input.charAt(actualPosition);
 				}
-				token.type = TokenType.LITERAL;
+				token.rawSurface = input.substring(token.rawStart, actualPosition);
+				token.surface = input.substring(token.start, actualPosition);
+				token.type = TokenType.NUMBER;
 			} else if (ch == '"') {
 				actualPosition++;
-				if (previousToken.type != TokenType.STRINGPARAM) {
+				if (previousToken.type != TokenType.STRING) {
 					ch = input.charAt(actualPosition);
 					while (ch != '"') {
 						token.append(input.charAt(actualPosition++));
 						ch = actualPosition == input.length() ? 0 : input.charAt(actualPosition);
 					}
-					token.type = TokenType.STRINGPARAM;
+					token.type = TokenType.STRING;
 				} else {
 					return next();
 				}
@@ -182,9 +197,9 @@ public class Expression {
 				token.type = ch == '(' ? isFunctionOrOperator(token.surface) : TokenType.VARIABLE;
 			} else if (ch == '(' || ch == ')' || ch == ',') {
 				if (ch == '(') {
-					token.type = TokenType.OPEN_PAREN;
+					token.type = TokenType.OPEN_BRACKET;
 				} else if (ch == ')') {
-					token.type = TokenType.CLOSE_PAREN;
+					token.type = TokenType.CLOSE_BRACKET;
 				} else {
 					token.type = TokenType.COMMA;
 				}
@@ -212,7 +227,7 @@ public class Expression {
 					token.append(greedyMatch);
 				}
 				if (previousToken == null || previousToken.type == TokenType.OPERATOR
-						|| previousToken.type == TokenType.OPEN_PAREN || previousToken.type == TokenType.COMMA) {
+						|| previousToken.type == TokenType.OPEN_BRACKET || previousToken.type == TokenType.COMMA) {
 					token.surface += "u";
 					token.type = TokenType.UNARY_OPERATOR;
 				} else {
@@ -244,74 +259,87 @@ public class Expression {
 	protected void initializeVariable() {
 		setVariable("false", BigDecimal.ZERO);
 		setVariable("true", BigDecimal.ONE);
+		setVariable("pi", BigDecimal.valueOf(Math.PI));
+		setVariable("e", BigDecimal.valueOf(Math.E));
 	}
 
 	protected void initializeFunction() {
-		addFunction(new AbstractFunction<Object>(this, "if", 3) {
+		initializeBooleanFunction();
+		initializeMathematicalFunction();
+		initializeTrigonometricFunction();
+	}
+
+	protected void initializeBooleanFunction() {
+		addFunction(new AbstractFunction(this, "if", 3) {
 			@Override
-			public Operand<Object> eval(List<Operand<?>> lazyOperands) {
-				return new AbstractLazyOperand<Object>(Expression.this) {
-					@Override
-					protected Object doEval() {
-						Boolean result = lazyOperands.get(0).getValue(Boolean.class);
-						return result ? lazyOperands.get(1).getValue() : lazyOperands.get(2).getValue();
-					}
-				};
+			protected Object doEval(List<Operand> operands) {
+				return Utils.getAndAssertNotNullOperandAtIndex(this, operands, 0, Boolean.class)
+						? operands.get(1).getValue()
+						: operands.get(2).getValue();
 			}
 		});
-		// addFunction(new AbstractFunction<Boolean>("not", 1) {
-		//
-		// @Override
-		// public Boolean doEval(List<Operand<?>> lazyOperands) {
-		// return Boolean.valueOf(!lazyOperands.get(0).eval().getValue(Boolean.class));
-		// }
-		//
-		// });
+		addFunction(new AbstractFunction(this, "not", 1) {
+			@Override
+			protected Object doEval(List<Operand> operands) {
+				return !Utils.getAndAssertNotNullOperandAtIndex(this, operands, 0, Boolean.class);
+			}
+		});
+	}
+
+	protected void initializeMathematicalFunction() {
+		addFunction(new AbstractFunction(this, "max", -1) {
+			@Override
+			protected Object doEval(List<Operand> operands) {
+				Utils.assertAtLeastOneOperand(this, operands);
+				return IntStream.range(0, operands.size()).mapToObj(
+						index -> Utils.getAndAssertNotNullOperandAtIndex(this, operands, index, BigDecimal.class))
+						.max(Comparator.naturalOrder()).get();
+			}
+		});
+		addFunction(new AbstractFunction(this, "min", -1) {
+			@Override
+			protected Object doEval(List<Operand> operands) {
+				Utils.assertAtLeastOneOperand(this, operands);
+				return IntStream.range(0, operands.size()).mapToObj(
+						index -> Utils.getAndAssertNotNullOperandAtIndex(this, operands, index, BigDecimal.class))
+						.min(Comparator.naturalOrder()).get();
+			}
+		});
+	}
+
+	protected void initializeTrigonometricFunction() {
+		addFunction(new AbstractFunction(this, "sin", 1) {
+			@Override
+			protected Object doEval(List<Operand> operands) {
+				return new BigDecimal(Math.sin(
+						Utils.getAndAssertNotNullOperandAtIndex(this, operands, 0, BigDecimal.class).doubleValue()));
+			}
+		});
 	}
 
 	protected void initializeOperator() {
-		addOperator(new AbstractOperator<BigDecimal>(this, "+", OPERATOR_PRECEDENCE_ADDITIVE, true) {
+		addOperator(new AbstractOperator(this, "+", OPERATOR_PRECEDENCE_ADDITIVE, true) {
 			@Override
-			public Operand<BigDecimal> eval(Operand<?> leftOperand, Operand<?> rightOperand) {
-				return new AbstractLazyOperand<BigDecimal>(Expression.this) {
-					@Override
-					protected BigDecimal doEval() {
-						return leftOperand.getValue(BigDecimal.class).add(rightOperand.getValue(BigDecimal.class));
-					}
-				};
+			public Object doEval(Operand leftOperand, Operand rightOperand) {
+				return leftOperand.getValue(BigDecimal.class).add(rightOperand.getValue(BigDecimal.class));
 			}
 		});
-		addOperator(new AbstractOperator<BigDecimal>(this, "-", OPERATOR_PRECEDENCE_ADDITIVE, true) {
+		addOperator(new AbstractOperator(this, "-", OPERATOR_PRECEDENCE_ADDITIVE, true) {
 			@Override
-			public Operand<BigDecimal> eval(Operand<?> leftOperand, Operand<?> rightOperand) {
-				return new AbstractLazyOperand<BigDecimal>(Expression.this) {
-					@Override
-					protected BigDecimal doEval() {
-						return leftOperand.getValue(BigDecimal.class).subtract(rightOperand.getValue(BigDecimal.class));
-					}
-				};
+			protected Object doEval(Operand leftOperand, Operand rightOperand) {
+				return leftOperand.getValue(BigDecimal.class).subtract(rightOperand.getValue(BigDecimal.class));
 			}
 		});
-		addOperator(new AbstractOperator<BigDecimal>(this, "*", OPERATOR_PRECEDENCE_MULTIPLICATIVE, true) {
+		addOperator(new AbstractOperator(this, "*", OPERATOR_PRECEDENCE_MULTIPLICATIVE, true) {
 			@Override
-			public Operand<BigDecimal> eval(Operand<?> leftOperand, Operand<?> rightOperand) {
-				return new AbstractLazyOperand<BigDecimal>(Expression.this) {
-					@Override
-					protected BigDecimal doEval() {
-						return leftOperand.getValue(BigDecimal.class).multiply(rightOperand.getValue(BigDecimal.class));
-					}
-				};
+			protected Object doEval(Operand leftOperand, Operand rightOperand) {
+				return leftOperand.getValue(BigDecimal.class).multiply(rightOperand.getValue(BigDecimal.class));
 			}
 		});
-		addOperator(new AbstractOperator<BigDecimal>(this, "/", OPERATOR_PRECEDENCE_MULTIPLICATIVE, true) {
+		addOperator(new AbstractOperator(this, "/", OPERATOR_PRECEDENCE_MULTIPLICATIVE, true) {
 			@Override
-			public Operand<BigDecimal> eval(Operand<?> leftOperand, Operand<?> rightOperand) {
-				return new AbstractLazyOperand<BigDecimal>(Expression.this) {
-					@Override
-					protected BigDecimal doEval() {
-						return leftOperand.getValue(BigDecimal.class).divide(rightOperand.getValue(BigDecimal.class));
-					}
-				};
+			protected Object doEval(Operand leftOperand, Operand rightOperand) {
+				return leftOperand.getValue(BigDecimal.class).divide(rightOperand.getValue(BigDecimal.class));
 			}
 		});
 		// addOperator(new AbstractOperator<BigDecimal>("/",
@@ -410,24 +438,6 @@ public class Expression {
 		// }
 		//
 		// });
-		// addOperator(new AbstractOperator<Boolean>("=", OPERATOR_PRECEDENCE_EQUALITY,
-		// false) {
-		//
-		// @Override
-		// public Boolean doEval(Operand<?> leftOperand, Operand<?> rightOperand) {
-		// BigDecimal v1 = leftOperand.getValue(BigDecimal.class);
-		// BigDecimal v2 = rightOperand.getValue(BigDecimal.class);
-		// Boolean result = null;
-		// if (v1 == v2) {
-		// result = Boolean.TRUE;
-		// } else if (v1 == null || v2 == null) {
-		// result = Boolean.FALSE;
-		// } else {
-		// result = Boolean.valueOf(v1.compareTo(v2) == 0);
-		// }
-		// return result;
-		// }
-		// });
 		// addOperator(new AbstractOperator<Boolean>("==", OPERATOR_PRECEDENCE_EQUALITY,
 		// false) {
 		//
@@ -513,39 +523,89 @@ public class Expression {
 		// return operandFactory.createOperand(this, leftOperand, rightOperand, result);
 		// }
 		// });
+		initializeBooleanOperator();
+	}
+
+	protected void initializeBooleanOperator() {
+		addOperator(new AbstractOperator(this, "=", OPERATOR_PRECEDENCE_EQUALITY, false) {
+			@Override
+			protected Object doEval(Operand leftOperand, Operand rightOperand) {
+				return Utils.equals(leftOperand, rightOperand);
+			}
+		});
+		addOperator(new ProxyOperator("==", operators.get("=")));
+		addOperator(new AbstractOperator(this, "!=", OPERATOR_PRECEDENCE_EQUALITY, false) {
+			@Override
+			protected Object doEval(Operand leftOperand, Operand rightOperand) {
+				return !Utils.equals(leftOperand, rightOperand);
+			}
+		});
+		addOperator(new ProxyOperator("<>", operators.get("!=")));
+		addOperator(new AbstractOperator(this, "&&", OPERATOR_PRECEDENCE_AND, false) {
+			@Override
+			protected Object doEval(Operand leftOperand, Operand rightOperand) {
+				Boolean leftValue = Utils.getAndAssertNotNullLeftOperand(this, leftOperand, Boolean.class);
+				Boolean rightValue = Utils.getAndAssertNotNullRightOperand(this, rightOperand, Boolean.class);
+				return leftValue.booleanValue() && rightValue.booleanValue();
+			}
+		});
+		addOperator(new ProxyOperator("and", operators.get("&&")));
+		addOperator(new AbstractOperator(this, "||", OPERATOR_PRECEDENCE_OR, false) {
+			@Override
+			protected Object doEval(Operand leftOperand, Operand rightOperand) {
+				Boolean leftValue = Utils.getAndAssertNotNullLeftOperand(this, leftOperand, Boolean.class);
+				Boolean rightValue = Utils.getAndAssertNotNullRightOperand(this, rightOperand, Boolean.class);
+				return leftValue.booleanValue() || rightValue.booleanValue();
+			}
+		});
+		addOperator(new ProxyOperator("or", operators.get("&&")));
+		addOperator(new AbstractOperator(this, "<", OPERATOR_PRECEDENCE_COMPARISON, false) {
+			@Override
+			protected Object doEval(Operand leftOperand, Operand rightOperand) {
+				BigDecimal leftValue = Utils.getAndAssertNotNullLeftOperand(this, leftOperand, BigDecimal.class);
+				BigDecimal rightValue = Utils.getAndAssertNotNullRightOperand(this, rightOperand, BigDecimal.class);
+				return leftValue.compareTo(rightValue) == -1;
+			}
+		});
+		addOperator(new AbstractOperator(this, ">", OPERATOR_PRECEDENCE_COMPARISON, false) {
+			@Override
+			protected Object doEval(Operand leftOperand, Operand rightOperand) {
+				BigDecimal leftValue = Utils.getAndAssertNotNullLeftOperand(this, leftOperand, BigDecimal.class);
+				BigDecimal rightValue = Utils.getAndAssertNotNullRightOperand(this, rightOperand, BigDecimal.class);
+				return leftValue.compareTo(rightValue) == 1;
+			}
+		});
+		addOperator(new AbstractOperator(this, "<=", OPERATOR_PRECEDENCE_COMPARISON, false) {
+			@Override
+			protected Object doEval(Operand leftOperand, Operand rightOperand) {
+				BigDecimal leftValue = Utils.getAndAssertNotNullLeftOperand(this, leftOperand, BigDecimal.class);
+				BigDecimal rightValue = Utils.getAndAssertNotNullRightOperand(this, rightOperand, BigDecimal.class);
+				return leftValue.compareTo(rightValue) != 1;
+			}
+		});
+		addOperator(new AbstractOperator(this, ">=", OPERATOR_PRECEDENCE_COMPARISON, false) {
+			@Override
+			protected Object doEval(Operand leftOperand, Operand rightOperand) {
+				BigDecimal leftValue = Utils.getAndAssertNotNullLeftOperand(this, leftOperand, BigDecimal.class);
+				BigDecimal rightValue = Utils.getAndAssertNotNullRightOperand(this, rightOperand, BigDecimal.class);
+				return leftValue.compareTo(rightValue) != -1;
+			}
+		});
 	}
 
 	protected void initializeUnaryOperator() {
-		// addUnaryOperator(new AbstractUnaryOperator<BigDecimal>("-",
-		// OPERATOR_PRECEDENCE_UNARY) {
-		//
-		// @Override
-		// public Operand<BigDecimal> eval(Operand<?> operand) {
-		// BigDecimal result = operand.getValue(BigDecimal.class).multiply(new
-		// BigDecimal(-1));
-		// return operandFactory.createOperand(this, operand, result);
-		// }
-		//
-		// });
-		// addUnaryOperator(new AbstractUnaryOperator<BigDecimal>("+",
-		// OPERATOR_PRECEDENCE_UNARY) {
-		//
-		// @Override
-		// public Operand<BigDecimal> eval(Operand<?> operand) {
-		// BigDecimal result =
-		// operand.getValue(BigDecimal.class).multiply(BigDecimal.ONE);
-		// return operandFactory.createOperand(this, operand, result);
-		// }
-		//
-		// });
-	}
-
-	private <T> T supplyOrThrow(Supplier<T> supplier) {
-		try {
-			return supplier.get();
-		} catch (Exception exception) {
-			throw exception;
-		}
+		addUnaryOperator(new AbstractUnaryOperator(this, "-", OPERATOR_PRECEDENCE_UNARY) {
+			@Override
+			protected Object doEval(Operand operand) {
+				return Utils.getAndAssertNotNullOperand(this, operand, BigDecimal.class).multiply(new BigDecimal(-1));
+			}
+		});
+		addUnaryOperator(new AbstractUnaryOperator(this, "+", OPERATOR_PRECEDENCE_UNARY) {
+			@Override
+			protected Object doEval(Operand operand) {
+				return Utils.getAndAssertNotNullOperand(this, operand, BigDecimal.class);
+			}
+		});
 	}
 
 	private List<Token> shuntingYard(String expression) {
@@ -557,10 +617,8 @@ public class Expression {
 		while (tokenizer.hasNext()) {
 			Token token = tokenizer.next();
 			switch (token.type) {
-			case STRINGPARAM:
-				stack.push(token);
-				break;
-			case LITERAL:
+			case STRING:
+			case NUMBER:
 			case VARIABLE:
 				outputQueue.add(token);
 				break;
@@ -573,7 +631,7 @@ public class Expression {
 					throw new LitExpException("Missing parameter(s) for operator " + previousToken
 							+ " at character position " + previousToken.end);
 				}
-				while (!stack.isEmpty() && stack.peek().type != TokenType.OPEN_PAREN) {
+				while (!stack.isEmpty() && stack.peek().type != TokenType.OPEN_BRACKET) {
 					outputQueue.add(stack.pop());
 				}
 				if (stack.isEmpty()) {
@@ -586,11 +644,11 @@ public class Expression {
 				break;
 			case OPERATOR: {
 				if (previousToken != null
-						&& (previousToken.type == TokenType.COMMA || previousToken.type == TokenType.OPEN_PAREN)) {
+						&& (previousToken.type == TokenType.COMMA || previousToken.type == TokenType.OPEN_BRACKET)) {
 					throw new LitExpException(
 							"Missing parameter(s) for operator " + token + " at character position " + token.end);
 				}
-				Operator<?> o1 = operators.get(token.surface);
+				Operator o1 = operators.get(token.surface);
 				if (o1 == null) {
 					throw new LitExpException("Unknown operator '" + token + "' at position " + (token.end + 1));
 				}
@@ -601,11 +659,11 @@ public class Expression {
 			}
 			case UNARY_OPERATOR: {
 				if (previousToken != null && previousToken.type != TokenType.OPERATOR
-						&& previousToken.type != TokenType.COMMA && previousToken.type != TokenType.OPEN_PAREN) {
+						&& previousToken.type != TokenType.COMMA && previousToken.type != TokenType.OPEN_BRACKET) {
 					throw new LitExpException(
 							"Invalid position for unary operator " + token + " at character position " + token.end);
 				}
-				UnaryOperator<?> o1 = unaryOperators.get(token.surface);
+				UnaryOperator o1 = unaryOperators.get(token.surface);
 				if (o1 == null) {
 					throw new LitExpException(
 							"Unknown unary operator '" + token.surface.substring(0, token.surface.length() - 1)
@@ -616,9 +674,9 @@ public class Expression {
 				stack.push(token);
 				break;
 			}
-			case OPEN_PAREN:
+			case OPEN_BRACKET:
 				if (previousToken != null) {
-					if (previousToken.type == TokenType.LITERAL || previousToken.type == TokenType.CLOSE_PAREN
+					if (previousToken.type == TokenType.NUMBER || previousToken.type == TokenType.CLOSE_BRACKET
 							|| previousToken.type == TokenType.VARIABLE) {
 						// Implicit multiplication, e.g. 23(a+b) or (a+b)(a-b)
 						Token multiplication = new Token();
@@ -634,12 +692,12 @@ public class Expression {
 				}
 				stack.push(token);
 				break;
-			case CLOSE_PAREN:
+			case CLOSE_BRACKET:
 				if (previousToken != null && previousToken.type == TokenType.OPERATOR) {
 					throw new LitExpException("Missing parameter(s) for operator " + previousToken
 							+ " at character position " + previousToken.end);
 				}
-				while (!stack.isEmpty() && stack.peek().type != TokenType.OPEN_PAREN) {
+				while (!stack.isEmpty() && stack.peek().type != TokenType.OPEN_BRACKET) {
 					outputQueue.add(stack.pop());
 				}
 				if (stack.isEmpty()) {
@@ -654,7 +712,7 @@ public class Expression {
 		}
 		while (!stack.isEmpty()) {
 			Token element = stack.pop();
-			if (element.type == TokenType.OPEN_PAREN || element.type == TokenType.CLOSE_PAREN) {
+			if (element.type == TokenType.OPEN_BRACKET || element.type == TokenType.CLOSE_BRACKET) {
 				throw new LitExpException("Mismatched parentheses");
 			}
 			outputQueue.add(element);
@@ -662,10 +720,11 @@ public class Expression {
 		return outputQueue;
 	}
 
-	private void shuntOperators(List<Token> outputQueue, Stack<Token> stack, Operator<?> o1) {
+	private void shuntOperators(List<Token> outputQueue, Stack<Token> stack, Operator o1) {
 		Expression.Token nextToken = stack.isEmpty() ? null : stack.peek();
 		while (nextToken != null
-				&& (nextToken.type == Expression.TokenType.OPERATOR || nextToken.type == Expression.TokenType.UNARY_OPERATOR)
+				&& (nextToken.type == Expression.TokenType.OPERATOR
+						|| nextToken.type == Expression.TokenType.UNARY_OPERATOR)
 				&& ((o1.isLeftAssociative() && o1.getPrecedence() <= operators.get(nextToken.surface).getPrecedence())
 						|| (o1.getPrecedence() < operators.get(nextToken.surface).getPrecedence()))) {
 			outputQueue.add(stack.pop());
@@ -673,10 +732,11 @@ public class Expression {
 		}
 	}
 
-	private void shuntOperators(List<Token> outputQueue, Stack<Token> stack, UnaryOperator<?> o1) {
+	private void shuntOperators(List<Token> outputQueue, Stack<Token> stack, UnaryOperator o1) {
 		Expression.Token nextToken = stack.isEmpty() ? null : stack.peek();
 		while (nextToken != null
-				&& (nextToken.type == Expression.TokenType.OPERATOR || nextToken.type == Expression.TokenType.UNARY_OPERATOR)
+				&& (nextToken.type == Expression.TokenType.OPERATOR
+						|| nextToken.type == Expression.TokenType.UNARY_OPERATOR)
 				&& ((o1.getPrecedence() <= operators.get(nextToken.surface).getPrecedence())
 						|| (o1.getPrecedence() < operators.get(nextToken.surface).getPrecedence()))) {
 			outputQueue.add(stack.pop());
@@ -693,33 +753,35 @@ public class Expression {
 	 * 
 	 * @return The result of the expression.
 	 */
-	public Operand<?> eval() {
-		Deque<Operand<?>> stack = new ArrayDeque<>();
-		Operand<?> result = null;
+	public Operand eval() {
+		Deque<Operand> stack = new ArrayDeque<>();
+		Operand result = null;
 		for (final Token token : getRPN()) {
 			switch (token.type) {
 			case UNARY_OPERATOR: {
-				Operand<?> value = stack.pop();
+				Operand value = stack.pop();
 				result = unaryOperators.get(token.surface).eval(value);
 				stack.push(result);
 				break;
 			}
 			case OPERATOR:
-				Operand<?> rightValue = stack.pop();
-				Operand<?> leftValue = stack.pop();
+				Operand rightValue = stack.pop();
+				Operand leftValue = stack.pop();
 				result = operators.get(token.surface).eval(leftValue, rightValue);
 				stack.push(result);
 				break;
 			case VARIABLE:
-				if (!variables.containsKey(token.surface)) {
-					throw new LitExpException("Unknown variable: " + token);
-				}
-				result = variables.get(token.surface);
+				result = operandFactory.createOperand(token, () -> {
+					if (!variables.containsKey(token.surface)) {
+						throw new LitExpException("Unknown variable: " + token);
+					}
+					return variables.get(token.surface).getValue();
+				});
 				stack.push(result);
 				break;
 			case FUNCTION:
-				Function<?> function = functions.get(token.surface.toUpperCase(Locale.ROOT));
-				List<Operand<?>> arguments = new ArrayList<>(
+				Function function = functions.get(token.surface.toUpperCase(Locale.ROOT));
+				List<Operand> arguments = new ArrayList<>(
 						function.isVariableArguments() ? 0 : function.getNumberArguments());
 				while (!stack.isEmpty() && stack.peek() != PARAMS_START) {
 					arguments.add(0, stack.pop());
@@ -730,31 +792,15 @@ public class Expression {
 				result = function.eval(arguments);
 				stack.push(result);
 				break;
-			case OPEN_PAREN:
+			case OPEN_BRACKET:
 				stack.push(PARAMS_START);
 				break;
-			case LITERAL:
-				result = new AbstractLazyOperand<Object>(Expression.this) {
-
-					@Override
-					protected Object doEval() {
-						return new BigDecimal(token.surface);
-					}
-
-				};
-				// result = operandFactory.createOperand(token, token.surface);
+			case NUMBER:
+				result = operandFactory.createOperand(token, () -> token.surface);
 				stack.push(result);
 				break;
-			case STRINGPARAM:
-				result = new AbstractLazyOperand<Object>(Expression.this) {
-
-					@Override
-					protected Object doEval() {
-						return token.surface;
-					}
-
-				};
-				// result = operandFactory.createOperand(token, token.surface);
+			case STRING:
+				result = operandFactory.createOperand(token, () -> token.surface);
 				stack.push(result);
 				break;
 			default:
@@ -774,29 +820,28 @@ public class Expression {
 		return this;
 	}
 
-	public Operator<?> addOperator(Operator<?> operator) {
+	public Operator addOperator(Operator operator) {
 		return operators.put(operator.getOperator(), operator);
 	}
 
-	public UnaryOperator<?> addUnaryOperator(UnaryOperator<?> unaryOperator) {
+	public UnaryOperator addUnaryOperator(UnaryOperator unaryOperator) {
 		return unaryOperators.put(unaryOperator.getOperator() + "u", unaryOperator);
 	}
 
-	public Function<?> addFunction(Function<?> function) {
+	public Function addFunction(Function function) {
 		return functions.put(function.getName(), function);
 	}
 
-	// public void setOperandFactory(OperandFactory operandFactory) {
-	// operandFactory.setExpression(this);
-	// this.operandFactory = operandFactory;
-	// }
-	//
-	// public OperandFactory getOperandFactory() {
-	// return operandFactory;
-	// }
+	public void setOperandFactory(OperandFactory operandFactory) {
+		this.operandFactory = operandFactory;
+	}
+
+	public OperandFactory getOperandFactory() {
+		return operandFactory;
+	}
 
 	public Expression setVariable(String variable, Object value) {
-		// variables.put(variable, operandFactory.createOperand(value));
+		variables.put(variable, operandFactory.createOperand(() -> value));
 		return this;
 	}
 
@@ -844,7 +889,7 @@ public class Expression {
 				stack.set(stack.size() - 1, stack.peek() - 2 + 1);
 				break;
 			case FUNCTION:
-				Function<?> function = functions.get(token.surface.toUpperCase(Locale.ROOT));
+				Function function = functions.get(token.surface.toUpperCase(Locale.ROOT));
 				if (function == null) {
 					throw new LitExpException("Unknown function '" + token + "' at position " + (token.end + 1));
 				}
@@ -860,7 +905,7 @@ public class Expression {
 				// push the result of the function
 				stack.set(stack.size() - 1, stack.peek() + 1);
 				break;
-			case OPEN_PAREN:
+			case OPEN_BRACKET:
 				stack.push(0);
 				break;
 			default:
@@ -897,21 +942,6 @@ public class Expression {
 		return ' ' == c || '\u00A0' == c;
 	}
 
-	@FunctionalInterface
-	public interface ThrowingSupplier<T, E extends Exception> {
-		T get() throws E;
-	}
-
-	private static <T> Supplier<T> throwingSupplierWrapper(ThrowingSupplier<T, Exception> throwingSupplier) {
-		return () -> {
-			try {
-				return throwingSupplier.get();
-			} catch (Exception ex) {
-				throw new RuntimeException(ex);
-			}
-		};
-	}
-
 	public static class LitExpException extends RuntimeException {
 
 		private static final long serialVersionUID = 4579617239233899089L;
@@ -922,26 +952,45 @@ public class Expression {
 
 	}
 
-	public interface Operand<T> {
+	public interface Operand {
 
-		T getValue();
+		Object getValue();
 
 		<U> U getValue(Class<U> valueClass);
 
 	}
 
-	public static abstract class AbstractLazyOperand<T> implements Operand<T> {
+	public static abstract class AbstractOperand implements Operand {
 
 		protected Expression litExp;
 
-		private T value;
+		private Object value;
+
+		public AbstractOperand(Expression litExp, Object value) {
+			this.litExp = litExp;
+			this.value = value;
+		}
+
+		@Override
+		public Object getValue() {
+			return value;
+		}
+
+	}
+
+	public static abstract class AbstractLazyOperand implements Operand {
+
+		protected Expression litExp;
+
+		private boolean evaluated = false;
+		private Object value;
 
 		public AbstractLazyOperand(Expression litExp) {
 			this.litExp = litExp;
 		}
 
 		@Override
-		public final T getValue() {
+		public final Object getValue() {
 			eval();
 			return value;
 		}
@@ -953,20 +1002,21 @@ public class Expression {
 		}
 
 		protected void eval() {
-			if (value == null) {
+			if (!evaluated) {
+				evaluated = true;
 				value = doEval();
 			}
 		}
 
 		protected <U> U doGetValue(Class<U> valueClass) {
-			return (U) (valueClass.equals(value.getClass()) ? value : null);
+			return (U) (value != null && valueClass.equals(value.getClass()) ? value : null);
 		}
 
-		protected abstract T doEval();
+		protected abstract Object doEval();
 
 	}
 
-	public interface Function<T> {
+	public interface Function {
 
 		String getName();
 
@@ -976,11 +1026,44 @@ public class Expression {
 			return getNumberArguments() < 0;
 		}
 
-		Operand<T> eval(List<Operand<?>> operands);
+		Operand eval(List<Operand> operands);
 
 	}
 
-	public static abstract class AbstractFunction<T> implements Function<T> {
+	public static class ProxyFunction implements Function {
+
+		protected Function function;
+
+		private String name;
+
+		public ProxyFunction(String name, Function function) {
+			this.name = name;
+			this.function = function;
+		}
+
+		@Override
+		public String getName() {
+			return name;
+		}
+
+		@Override
+		public int getNumberArguments() {
+			return function.getNumberArguments();
+		}
+
+		@Override
+		public boolean isVariableArguments() {
+			return function.isVariableArguments();
+		}
+
+		@Override
+		public Operand eval(List<Operand> operands) {
+			return function.eval(operands);
+		}
+
+	}
+
+	public static abstract class AbstractFunction implements Function {
 
 		protected Expression litExp;
 
@@ -1003,9 +1086,16 @@ public class Expression {
 			return numberArguments;
 		}
 
+		@Override
+		public final Operand eval(List<Operand> operands) {
+			return litExp.getOperandFactory().createOperand(this, operands, () -> doEval(operands));
+		}
+
+		protected abstract Object doEval(List<Operand> operands);
+
 	}
 
-	public interface Operator<T> {
+	public interface Operator {
 
 		String getOperator();
 
@@ -1013,20 +1103,53 @@ public class Expression {
 
 		boolean isLeftAssociative();
 
-		Operand<T> eval(Operand<?> leftOperand, Operand<?> rightOperand);
+		Operand eval(Operand leftOperand, Operand rightOperand);
 
 	}
 
-	public static abstract class AbstractOperator<T> implements Operator<T> {
+	public static class ProxyOperator implements Operator {
 
-		protected Expression litExp;
+		protected Operator operator;
+
+		private String name;
+
+		public ProxyOperator(String name, Operator operator) {
+			this.name = name;
+			this.operator = operator;
+		}
+
+		@Override
+		public String getOperator() {
+			return name;
+		}
+
+		@Override
+		public int getPrecedence() {
+			return operator.getPrecedence();
+		}
+
+		@Override
+		public boolean isLeftAssociative() {
+			return operator.isLeftAssociative();
+		}
+
+		@Override
+		public Operand eval(Operand leftOperand, Operand rightOperand) {
+			return operator.eval(leftOperand, rightOperand);
+		}
+
+	}
+
+	public static abstract class AbstractOperator implements Operator {
+
+		protected Expression expression;
 
 		private String operator;
 		private int precedence;
 		private boolean leftAssociative;
 
 		public AbstractOperator(Expression litExp, String operator, int precedence, boolean leftAssociative) {
-			this.litExp = litExp;
+			this.expression = litExp;
 			this.operator = operator;
 			this.precedence = precedence;
 			this.leftAssociative = leftAssociative;
@@ -1047,19 +1170,55 @@ public class Expression {
 			return leftAssociative;
 		}
 
+		@Override
+		public final Operand eval(Operand leftOperand, Operand rightOperand) {
+			return expression.getOperandFactory().createOperand(this, leftOperand, rightOperand,
+					() -> doEval(leftOperand, rightOperand));
+		}
+
+		protected abstract Object doEval(Operand leftOperand, Operand rightOperand);
+
 	}
 
-	public interface UnaryOperator<T> {
+	public interface UnaryOperator {
 
 		String getOperator();
 
 		int getPrecedence();
 
-		Operand<T> eval(Operand<?> operand);
+		Operand eval(Operand operand);
 
 	}
 
-	public static abstract class AbstractUnaryOperator<T> implements UnaryOperator<T> {
+	public static class ProxyUnaryOperator implements UnaryOperator {
+
+		protected UnaryOperator unaryOperator;
+
+		private String name;
+
+		public ProxyUnaryOperator(String name, UnaryOperator unaryOperator) {
+			this.name = name;
+			this.unaryOperator = unaryOperator;
+		}
+
+		@Override
+		public String getOperator() {
+			return name;
+		}
+
+		@Override
+		public int getPrecedence() {
+			return unaryOperator.getPrecedence();
+		}
+
+		@Override
+		public Operand eval(Operand operand) {
+			return unaryOperator.eval(operand);
+		}
+
+	}
+
+	public static abstract class AbstractUnaryOperator implements UnaryOperator {
 
 		protected Expression litExp;
 
@@ -1080,6 +1239,173 @@ public class Expression {
 		@Override
 		public int getPrecedence() {
 			return precedence;
+		}
+
+		@Override
+		public final Operand eval(Operand operand) {
+			return litExp.getOperandFactory().createOperand(this, operand, () -> doEval(operand));
+		}
+
+		protected abstract Object doEval(Operand operand);
+
+	}
+
+	public interface OperandFactory {
+
+		Operand createOperand(Supplier<Object> valueSupplier);
+
+		Operand createOperand(Token token, Supplier<Object> valueSupplier);
+
+		Operand createOperand(Function function, List<Operand> operands, Supplier<Object> valueSupplier);
+
+		Operand createOperand(Operator operator, Operand leftOperand, Operand rightOperand,
+				Supplier<Object> valueSupplier);
+
+		Operand createOperand(UnaryOperator unaryOperator, Operand operand, Supplier<Object> valueSupplier);
+
+	}
+
+	public static class DefaultOperandFactory implements OperandFactory {
+
+		private Expression expression;
+
+		public DefaultOperandFactory(Expression expression) {
+			this.expression = expression;
+		}
+
+		@Override
+		public Operand createOperand(Supplier<Object> valueSupplier) {
+			return createDefaultOperand(valueSupplier);
+		}
+
+		@Override
+		public Operand createOperand(Token token, Supplier<Object> valueSupplier) {
+			if (TokenType.NUMBER == token.type) {
+				return createDefaultOperand(() -> new BigDecimal(Objects.toString(valueSupplier.get())));
+			} else if (TokenType.STRING == token.type) {
+				return createDefaultOperand(() -> Objects.toString(valueSupplier.get()));
+			}
+			return createDefaultLazyOperand(valueSupplier);
+		}
+
+		@Override
+		public Operand createOperand(Function function, List<Operand> operands, Supplier<Object> valueSupplier) {
+			return createDefaultLazyOperand(valueSupplier);
+		}
+
+		@Override
+		public Operand createOperand(Operator operator, Operand leftOperand, Operand rightOperand,
+				Supplier<Object> valueSupplier) {
+			return createDefaultLazyOperand(valueSupplier);
+		}
+
+		@Override
+		public Operand createOperand(UnaryOperator unaryOperator, Operand operand, Supplier<Object> valueSupplier) {
+			return createDefaultLazyOperand(valueSupplier);
+		}
+
+		protected Operand createDefaultOperand(Supplier<Object> valueSupplier) {
+			return new AbstractOperand(expression, valueSupplier.get()) {
+				@Override
+				public <U> U getValue(Class<U> valueClass) {
+					return adapt(getValue(), valueClass);
+				}
+			};
+		}
+
+		protected Operand createDefaultLazyOperand(Supplier<Object> valueSupplier) {
+			return new AbstractLazyOperand(expression) {
+				@Override
+				protected Object doEval() {
+					return valueSupplier.get();
+				}
+
+				@Override
+				protected <U> U doGetValue(Class<U> valueClass) {
+					return adapt(getValue(), valueClass);
+				}
+			};
+		}
+
+	}
+
+	public static class Utils {
+
+		public static void assertAtLeastOneOperand(Function function, List<Operand> operands) {
+			if (operands.isEmpty())
+				throw new LitExpException(
+						String.format("no operand specified for function \"%s\"", function.getName()));
+		}
+
+		public static <U> U getAndAssertNotNullOperandAtIndex(Function function, List<Operand> operands, int index,
+				Class<U> clazz) {
+			return assertNotNull(index >= 0 && index < operands.size() ? operands.get(index).getValue(clazz) : null,
+					"operand %d can't be null for function %s", index, function.getName());
+		}
+
+		public static <U> U getAndAssertNotNullLeftOperand(Operator operator, Operand leftOperand, Class<U> clazz) {
+			return assertNotNull(leftOperand.getValue(clazz), "left operand can't be null for operator %s",
+					operator.getOperator());
+		}
+
+		public static <U> U getAndAssertNotNullRightOperand(Operator operator, Operand rightOperand, Class<U> clazz) {
+			return assertNotNull(rightOperand.getValue(clazz), "right operand can't be null for operator %s",
+					operator.getOperator());
+		}
+
+		public static <U> U getAndAssertNotNullOperand(UnaryOperator unaryOperator, Operand operand, Class<U> clazz) {
+			return assertNotNull(operand.getValue(clazz), "operand can't be null for unary operator %s",
+					unaryOperator.getOperator());
+		}
+
+		private static <U> U assertNotNull(U u, String message, Object... data) {
+			if (u == null)
+				throw new LitExpException(String.format(message, data));
+			return u;
+		}
+
+		public static <U> U adapt(Object value, Class<U> clazz) {
+			if (value == null) {
+				return (U) value;
+			}
+			if (clazz.isInstance(value)) {
+				return (U) value;
+			}
+			if (Boolean.class.equals(clazz) || boolean.class.equals(clazz)) {
+				if (value instanceof Number) {
+					return (U) Boolean.valueOf(((Number) value).doubleValue() != 0.0);
+				}
+			} else if (Number.class.isAssignableFrom(clazz)) {
+				if (value instanceof Boolean) {
+					return (U) (((Boolean) value).booleanValue() ? BigDecimal.ONE : BigDecimal.ZERO);
+				} else if (value instanceof String) {
+					return (U) new BigDecimal((String) value);
+				}
+			} else if (String.class.equals(clazz)) {
+				return (U) Objects.toString(value);
+			}
+			return null;
+		}
+
+		public static boolean equals(Operand leftOperand, Operand rightOperand) {
+			Object leftValue = leftOperand.getValue();
+			Object rightValue = rightOperand.getValue();
+			return Objects.equals(leftValue, rightValue) || tryEquals(leftOperand, rightOperand, leftValue)
+					|| tryEquals(leftOperand, rightOperand, rightValue);
+		}
+
+		private static boolean tryEquals(Operand leftOperand, Operand rightOperand, Object value) {
+			if (value == null) {
+				return false;
+			}
+			Class<?> clazz = value.getClass();
+			try {
+				Object leftValue = leftOperand.getValue(clazz);
+				Object rightValue = rightOperand.getValue(clazz);
+				return leftValue != null && rightValue != null && Objects.equals(leftValue, rightValue);
+			} catch (Exception exception) {
+				return false;
+			}
 		}
 
 	}
