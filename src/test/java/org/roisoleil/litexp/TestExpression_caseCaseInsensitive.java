@@ -1,4 +1,4 @@
-package com.roisoleil.litexp;
+package org.roisoleil.litexp;
 
 import static org.junit.Assert.assertEquals;
 
@@ -6,9 +6,9 @@ import java.math.BigDecimal;
 import java.util.List;
 
 import org.junit.Test;
-
-import com.roisoleil.litexp.Expression.AbstractFunction;
-import com.roisoleil.litexp.Expression.Operand;
+import org.roisoleil.litexp.Expression;
+import org.roisoleil.litexp.Expression.AbstractFunction;
+import org.roisoleil.litexp.Expression.Operand;
 
 public class TestExpression_caseCaseInsensitive {
 

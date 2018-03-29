@@ -1,8 +1,9 @@
-package com.roisoleil.litexp;
+package org.roisoleil.litexp;
 
 import java.math.BigDecimal;
 
 import org.junit.Assert;
+import org.roisoleil.litexp.Expression;
 
 public class TestUtils {
 

@@ -1,7 +1,7 @@
-package com.roisoleil.litexp;
+package org.roisoleil.litexp;
 
-import static com.roisoleil.litexp.TestUtils.assertStriclyEquals;
-import static com.roisoleil.litexp.TestUtils.evalToDouble;
+import static org.roisoleil.litexp.TestUtils.assertStriclyEquals;
+import static org.roisoleil.litexp.TestUtils.evalToDouble;
 
 import org.junit.Test;
 

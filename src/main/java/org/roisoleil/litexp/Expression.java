@@ -21,9 +21,9 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
-package com.roisoleil.litexp;
+package org.roisoleil.litexp;
 
-import static com.roisoleil.litexp.Expression.Utils.adapt;
+import static org.roisoleil.litexp.Expression.Utils.adapt;
 
 import java.math.BigDecimal;
 import java.util.ArrayDeque;

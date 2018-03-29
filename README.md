@@ -1,2 +1,2 @@
-# litexp
-A 'lite' mathematical and logical expression evaluator
+# LitExp
+A 'lite' mathematical and logical expression evaluator.

@@ -1,6 +1,6 @@
-package com.roisoleil.litexp;
+package org.roisoleil.litexp;
 
-import static com.roisoleil.litexp.TestUtils.*;
+import static org.roisoleil.litexp.TestUtils.*;
 
 import org.junit.Test;
 
